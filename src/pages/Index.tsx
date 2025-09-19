@@ -8,12 +8,6 @@ import Icon from '@/components/ui/icon';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 
-// Настройка PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-
-// Настройка PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-
 interface Message {
   id: string;
   content: string;
@@ -44,6 +38,11 @@ function Index() {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const extractTextFromPDF = async (file: File): Promise<string> => {
+    // Настраиваем worker перед использованием
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.js`;
+    }
+    
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     let fullText = '';
