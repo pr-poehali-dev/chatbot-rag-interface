@@ -10,8 +10,6 @@ import mammoth from 'mammoth';
 
 // Настройка PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-import * as pdfjsLib from 'pdfjs-dist';
-import mammoth from 'mammoth';
 
 // Настройка PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
@@ -29,9 +27,18 @@ interface RAGChunk {
   source: string;
 }
 
+interface DocumentChunk {
+  id: string;
+  content: string;
+  pageNumber?: number;
+  chunkIndex: number;
+  wordCount: number;
+}
+
 function Index() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [documentText, setDocumentText] = useState<string>('');
+  const [documentChunks, setDocumentChunks] = useState<DocumentChunk[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [ragChunks, setRagChunks] = useState<RAGChunk[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -74,130 +81,196 @@ function Index() {
     }
   };
 
+  const createRAGChunks = (text: string, chunkSize: number = 300): DocumentChunk[] => {
+    if (!text.trim()) return [];
+
+    // Очищаем текст от лишних пробелов и переносов
+    const cleanText = text.replace(/\s+/g, ' ').trim();
+    
+    // Разделяем на предложения
+    const sentences = cleanText.split(/[.!?]+/).filter(s => s.trim().length > 10);
+    
+    const chunks: DocumentChunk[] = [];
+    let currentChunk = '';
+    let chunkIndex = 0;
+
+    for (const sentence of sentences) {
+      const trimmedSentence = sentence.trim();
+      
+      // Если добавление предложения превысит размер чанка, создаем новый чанк
+      if (currentChunk.length + trimmedSentence.length > chunkSize && currentChunk.length > 0) {
+        chunks.push({
+          id: `chunk_${chunkIndex}`,
+          content: currentChunk.trim(),
+          chunkIndex,
+          wordCount: currentChunk.split(' ').length
+        });
+        
+        currentChunk = trimmedSentence;
+        chunkIndex++;
+      } else {
+        currentChunk += (currentChunk ? ' ' : '') + trimmedSentence;
+      }
+    }
+
+    // Добавляем последний чанк
+    if (currentChunk.trim()) {
+      chunks.push({
+        id: `chunk_${chunkIndex}`,
+        content: currentChunk.trim(),
+        chunkIndex,
+        wordCount: currentChunk.split(' ').length
+      });
+    }
+
+    return chunks;
+  };
+
   const handleFileUpload = async (file: File) => {
     setUploadedFile(file);
     setMessages([]);
     setRagChunks([]);
+    setDocumentChunks([]);
     
     // Извлекаем текст из файла
     const text = await extractTextFromFile(file);
     setDocumentText(text);
+    
+    // Создаем RAG-чанки для поиска
+    const chunks = createRAGChunks(text);
+    setDocumentChunks(chunks);
   };
 
-  const findRelevantChunks = (query: string, text: string): RAGChunk[] => {
-    if (!text) return [];
+  const calculateSemanticSimilarity = (query: string, chunk: DocumentChunk): number => {
+    const queryLower = query.toLowerCase();
+    const chunkLower = chunk.content.toLowerCase();
     
-    // Разбиваем текст на абзацы и предложения
-    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 20);
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 15);
-    
-    // Все возможные чанки (абзацы + предложения)
-    const allChunks = [
-      ...paragraphs.map((p, i) => ({ text: p, type: 'paragraph', index: i })),
-      ...sentences.map((s, i) => ({ text: s, type: 'sentence', index: i }))
-    ];
-    
-    // Ключевые слова из запроса
-    const queryWords = query.toLowerCase()
+    // Извлекаем ключевые слова из запроса
+    const queryWords = queryLower
       .split(/\s+/)
       .filter(w => w.length > 2)
       .map(w => w.replace(/[^\w\u0400-\u04FF]/g, ''));
     
-    // Оценка релевантности каждого чанка
-    const scoredChunks = allChunks.map((chunk) => {
-      const chunkLower = chunk.text.toLowerCase();
-      let score = 0;
+    if (queryWords.length === 0) return 0;
+    
+    let score = 0;
+    let totalPossibleScore = 0;
+    
+    queryWords.forEach(word => {
+      totalPossibleScore += 1;
       
-      // Точные совпадения слов
-      queryWords.forEach(word => {
-        const regex = new RegExp(`\\b${word}`, 'gi');
-        const matches = chunkLower.match(regex);
-        if (matches) {
-          score += matches.length * 0.3;
-        }
-      });
+      // Точное совпадение слова (высокий вес)
+      const exactMatches = (chunkLower.match(new RegExp(`\\b${word}\\b`, 'g')) || []).length;
+      score += exactMatches * 0.5;
       
-      // Частичные совпадения
-      queryWords.forEach(word => {
-        if (word.length > 3 && chunkLower.includes(word)) {
-          score += 0.1;
-        }
-      });
-      
-      // Бонус за длину чанка (более длинные чанки предпочтительнее)
-      if (chunk.type === 'paragraph') {
-        score += 0.05;
+      // Частичное совпадение (средний вес)
+      if (chunkLower.includes(word)) {
+        score += 0.2;
       }
       
-      // Бонус за позицию в документе (начало документа важнее)
-      const positionBonus = Math.max(0, 0.1 - (chunk.index / allChunks.length) * 0.1);
-      score += positionBonus;
-      
-      return {
-        content: chunk.text.trim(),
-        score: Math.min(score, 1),
-        source: chunk.type === 'paragraph' 
-          ? `Абзац ${chunk.index + 1}` 
-          : `Предложение ${chunk.index + 1}`
-      };
+      // Совпадения с вариациями слова (низкий вес)
+      const variations = [word + 'а', word + 'ы', word + 'и', word + 'ов', word + 'ах'];
+      variations.forEach(variation => {
+        if (chunkLower.includes(variation)) {
+          score += 0.05;
+        }
+      });
     });
     
-    // Возвращаем топ-5 самых релевантных с минимальным порогом
+    // Нормализуем по количеству слов в запросе
+    let normalizedScore = totalPossibleScore > 0 ? score / totalPossibleScore : 0;
+    
+    // Бонусы за контекст
+    // Бонус за длину чанка (оптимальная длина 100-500 символов)
+    const lengthBonus = chunk.content.length >= 100 && chunk.content.length <= 500 ? 0.1 : 0;
+    normalizedScore += lengthBonus;
+    
+    // Бонус за позицию в документе (первые чанки важнее)
+    const positionBonus = Math.max(0, 0.1 - (chunk.chunkIndex / documentChunks.length) * 0.1);
+    normalizedScore += positionBonus;
+    
+    return Math.min(normalizedScore, 1);
+  };
+
+  const findRelevantChunks = (query: string): RAGChunk[] => {
+    if (!documentChunks.length) return [];
+    
+    // Вычисляем релевантность для каждого чанка
+    const scoredChunks = documentChunks.map(chunk => ({
+      content: chunk.content,
+      score: calculateSemanticSimilarity(query, chunk),
+      source: `Чанк ${chunk.chunkIndex + 1} (${chunk.wordCount} слов)`
+    }));
+    
+    // Фильтруем и сортируем по релевантности
     return scoredChunks
-      .filter(chunk => chunk.score > 0.05)
+      .filter(chunk => chunk.score > 0.01) // Минимальный порог релевантности
       .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
+      .slice(0, 5); // Топ-5 результатов
   };
 
   const generateResponse = (query: string, chunks: RAGChunk[], fullText: string): string => {
     if (chunks.length === 0) {
-      return `К сожалению, в документе "${uploadedFile?.name || 'документ'}" не найдено информации, релевантной вашему запросу "${query}". Попробуйте переформулировать вопрос или использовать другие ключевые слова.`;
+      return `К сожалению, в документе "${uploadedFile?.name || 'документ'}" не найдено информации, релевантной вашему запросу "${query}". \n\nВозможные причины:\n• Информация отсутствует в документе\n• Попробуйте переформулировать вопрос\n• Используйте другие ключевые слова\n\nВсего создано ${documentChunks.length} чанков для анализа.`;
     }
     
+    const queryLower = query.toLowerCase();
     const topChunk = chunks[0];
     const highScoreChunks = chunks.filter(c => c.score > 0.3);
     
-    // Определяем тип вопроса для более точного ответа
-    const queryLower = query.toLowerCase();
-    let responsePrefix = '';
+    // Анализируем тип вопроса для улучшения ответа
+    let response = '';
     
-    if (queryLower.includes('название') || queryLower.includes('заголовок') || queryLower.includes('статья')) {
-      // Ищем заголовок в начале документа
-      const firstLines = fullText.split('\n').slice(0, 5);
-      const possibleTitle = firstLines.find(line => 
-        line.trim().length > 5 && 
-        line.trim().length < 200 && 
-        !line.includes('Abstract') &&
-        !line.includes('Keywords')
-      );
+    if (queryLower.includes('название') || queryLower.includes('заголовок') || queryLower.includes('статья') || queryLower.includes('title')) {
+      // Специальная обработка для вопросов о названии
+      const firstParagraphs = documentChunks.slice(0, 3);
+      let titleFound = false;
       
-      if (possibleTitle) {
-        responsePrefix = `Название документа: "${possibleTitle.trim()}"\n\n`;
+      for (const chunk of firstParagraphs) {
+        const content = chunk.content.trim();
+        // Ищем строки, которые могут быть заголовком
+        if (content.length > 10 && content.length < 200 && 
+            !content.toLowerCase().includes('abstract') &&
+            !content.toLowerCase().includes('introduction') &&
+            !content.toLowerCase().includes('keywords')) {
+          response = `Название статьи: "${content}"\n\n`;
+          titleFound = true;
+          break;
+        }
+      }
+      
+      if (!titleFound && topChunk) {
+        response = `Возможное название из релевантного фрагмента: "${topChunk.content}"\n\n`;
       }
     } else if (queryLower.includes('автор') || queryLower.includes('author')) {
-      responsePrefix = `Информация об авторе найдена в документе:\n\n`;
+      response = `Информация об авторах:\n\n`;
     } else if (queryLower.includes('аннотация') || queryLower.includes('abstract') || queryLower.includes('резюме')) {
-      responsePrefix = `Аннотация документа:\n\n`;
+      response = `Аннотация:\n\n`;
     } else if (queryLower.includes('вывод') || queryLower.includes('заключение') || queryLower.includes('conclusion')) {
-      responsePrefix = `Выводы из документа:\n\n`;
-    }
-    
-    let mainResponse = '';
-    if (highScoreChunks.length > 0) {
-      mainResponse = highScoreChunks.slice(0, 2).map(chunk => chunk.content).join('\n\n');
+      response = `Выводы:\n\n`;
     } else {
-      mainResponse = topChunk.content;
+      response = `По вашему вопросу "${query}" найдена следующая информация:\n\n`;
     }
     
-    const additionalInfo = chunks.length > 1 
-      ? `\n\nДополнительно найдено ${chunks.length - 1} связанных фрагментов с релевантностью от ${(chunks[chunks.length - 1]?.score * 100 || 0).toFixed(1)}% до ${(topChunk.score * 100).toFixed(1)}%.`
-      : '';
+    // Формируем основной ответ из релевантных чанков
+    if (highScoreChunks.length >= 2) {
+      // Используем несколько высокорелевантных чанков
+      response += highScoreChunks.slice(0, 2)
+        .map((chunk, index) => `${index + 1}. ${chunk.content}`)
+        .join('\n\n');
+    } else if (topChunk) {
+      // Используем самый релевантный чанк
+      response += topChunk.content;
+    }
     
-    return `${responsePrefix}${mainResponse}${additionalInfo}`;
+    // Добавляем информацию о поиске
+    const statsInfo = `\n\n📊 Статистика поиска:\n• Найдено релевантных фрагментов: ${chunks.length}\n• Максимальная релевантность: ${(topChunk.score * 100).toFixed(1)}%\n• Проанализировано чанков: ${documentChunks.length}`;
+    
+    return response + statsInfo;
   };
 
   const handleSendMessage = async (content: string) => {
-    if (!documentText) {
+    if (!documentText || !documentChunks.length) {
       return;
     }
 
@@ -211,10 +284,10 @@ function Index() {
     setMessages(prev => [...prev, userMessage]);
     setIsProcessing(true);
 
-    // Имитация задержки обработки
+    // Имитация задержки обработки RAG-поиска
     setTimeout(() => {
-      // Поиск релевантных чанков в реальном тексте документа
-      const relevantChunks = findRelevantChunks(content, documentText);
+      // Поиск релевантных чанков в RAG-индексе
+      const relevantChunks = findRelevantChunks(content);
       
       // Генерация ответа на основе найденных чанков
       const responseText = generateResponse(content, relevantChunks, documentText);
@@ -229,7 +302,7 @@ function Index() {
       setMessages(prev => [...prev, assistantMessage]);
       setRagChunks(relevantChunks);
       setIsProcessing(false);
-    }, 1500);
+    }, 1000);
   };
 
   return (
