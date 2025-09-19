@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Upload, Send, FileText, Bot, User, Loader2 } from 'lucide-react';
+import Icon from '@/components/ui/icon';
 
 interface Message {
   id: string;
@@ -206,7 +206,7 @@ export default function ChatBot() {
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center">
-              <Bot className="w-6 h-6 text-white" />
+              <Icon name="Bot" size={24} className="text-white" />
             </div>
             <div>
               <h1 className="text-lg font-semibold text-gray-900">RAG Чат-бот</h1>
@@ -231,9 +231,9 @@ export default function ChatBot() {
               className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {isProcessingFile ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Icon name="Loader2" size={16} className="animate-spin" />
               ) : (
-                <Upload className="w-4 h-4" />
+                <Icon name="Upload" size={16} />
               )}
               <span>{isProcessingFile ? 'Обработка...' : 'Загрузить файл'}</span>
             </button>
@@ -245,7 +245,7 @@ export default function ChatBot() {
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="text-center text-gray-500 mt-20">
-            <FileText className="w-16 h-16 mx-auto mb-4 text-gray-300" />
+            <Icon name="FileText" size={64} className="mx-auto mb-4 text-gray-300" />
             <h3 className="text-lg font-medium mb-2">Добро пожаловать в RAG чат-бот!</h3>
             <p>Загрузите документ (TXT, PDF, DOC, DOCX) и начните задавать вопросы по его содержимому.</p>
           </div>
@@ -259,9 +259,9 @@ export default function ChatBot() {
                   message.type === 'user' ? 'bg-blue-600 ml-3' : 'bg-gray-600 mr-3'
                 }`}>
                   {message.type === 'user' ? (
-                    <User className="w-4 h-4 text-white" />
+                    <Icon name="User" size={16} className="text-white" />
                   ) : (
-                    <Bot className="w-4 h-4 text-white" />
+                    <Icon name="Bot" size={16} className="text-white" />
                   )}
                 </div>
                 
@@ -302,11 +302,11 @@ export default function ChatBot() {
           <div className="flex justify-start">
             <div className="flex items-start space-x-3">
               <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
-                <Bot className="w-4 h-4 text-white" />
+                <Icon name="Bot" size={16} className="text-white" />
               </div>
               <div className="bg-white border border-gray-200 rounded-lg p-4">
                 <div className="flex items-center space-x-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
+                  <Icon name="Loader2" size={16} className="animate-spin text-gray-500" />
                   <span className="text-gray-500">Генерирую ответ...</span>
                 </div>
               </div>
@@ -334,7 +334,7 @@ export default function ChatBot() {
             disabled={!inputValue.trim() || !uploadedFile || isLoading}
             className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center space-x-2"
           >
-            <Send className="w-4 h-4" />
+            <Icon name="Send" size={16} />
             <span>Отправить</span>
           </button>
         </div>
