@@ -13,6 +13,24 @@ const FileUpload = ({ onFileUpload }: FileUploadProps) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
+  const handleFileUpload = async (file: File) => {
+    setIsUploading(true);
+    setUploadProgress(0);
+
+    // Симуляция загрузки с прогрессом
+    const interval = setInterval(() => {
+      setUploadProgress(prev => {
+        if (prev >= 100) {
+          clearInterval(interval);
+          setIsUploading(false);
+          onFileUpload(file);
+          return 100;
+        }
+        return prev + 10;
+      });
+    }, 200);
+  };
+
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(true);
@@ -41,24 +59,6 @@ const FileUpload = ({ onFileUpload }: FileUploadProps) => {
       handleFileUpload(file);
     }
   }, [handleFileUpload]);
-
-  const handleFileUpload = async (file: File) => {
-    setIsUploading(true);
-    setUploadProgress(0);
-
-    // Симуляция загрузки с прогрессом
-    const interval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setIsUploading(false);
-          onFileUpload(file);
-          return 100;
-        }
-        return prev + 10;
-      });
-    }, 200);
-  };
 
   return (
     <div className="w-full max-w-4xl mx-auto">
