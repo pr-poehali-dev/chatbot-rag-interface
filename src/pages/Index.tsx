@@ -5,6 +5,16 @@ import RAGVisualization from '@/components/RAGVisualization';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import Icon from '@/components/ui/icon';
+import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
+
+// Настройка PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
+
+// Настройка PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 interface Message {
   id: string;
@@ -26,21 +36,42 @@ function Index() {
   const [ragChunks, setRagChunks] = useState<RAGChunk[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
 
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((item: any) => item.str)
+        .join(' ');
+      fullText += pageText + '\n';
+    }
+
+    return fullText;
+  };
+
+  const extractTextFromDOCX = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    return result.value;
+  };
+
   const extractTextFromFile = async (file: File): Promise<string> => {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const text = e.target?.result as string;
-        if (file.type === 'application/pdf') {
-          // Симуляция извлечения текста из PDF
-          resolve(`Содержимое PDF файла "${file.name}":\n\nЭто демонстрационный текст, извлеченный из вашего PDF документа. В реальной системе здесь был бы настоящий текст из загруженного файла.\n\nОсновные разделы:\n1. Введение\n2. Методология\n3. Результаты исследования\n4. Выводы\n\nТекст содержит важную информацию по теме исследования.`);
-        } else {
-          // Симуляция извлечения текста из DOCX
-          resolve(`Содержимое DOCX файла "${file.name}":\n\nЭто демонстрационный текст из вашего Word документа. В реальной реализации здесь отображался бы фактический контент файла.\n\nСтруктура документа:\n- Заголовок\n- Основной текст\n- Таблицы и диаграммы\n- Заключение\n\nВ документе представлена подробная информация по запрашиваемой теме.`);
-        }
-      };
-      reader.readAsText(file);
-    });
+    try {
+      if (file.type === 'application/pdf') {
+        return await extractTextFromPDF(file);
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        return await extractTextFromDOCX(file);
+      } else {
+        throw new Error('Неподдерживаемый формат файла');
+      }
+    } catch (error) {
+      console.error('Ошибка извлечения текста:', error);
+      return `Ошибка при обработке файла "${file.name}". Убедитесь, что файл не поврежден и имеет правильный формат.`;
+    }
   };
 
   const handleFileUpload = async (file: File) => {
@@ -56,50 +87,113 @@ function Index() {
   const findRelevantChunks = (query: string, text: string): RAGChunk[] => {
     if (!text) return [];
     
-    // Разбиваем текст на предложения
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 10);
+    // Разбиваем текст на абзацы и предложения
+    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 20);
+    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 15);
     
-    // Ключевые слова из запроса (простая реализация)
-    const queryWords = query.toLowerCase().split(' ').filter(w => w.length > 2);
+    // Все возможные чанки (абзацы + предложения)
+    const allChunks = [
+      ...paragraphs.map((p, i) => ({ text: p, type: 'paragraph', index: i })),
+      ...sentences.map((s, i) => ({ text: s, type: 'sentence', index: i }))
+    ];
     
-    // Оценка релевантности каждого предложения
-    const scoredChunks = sentences.map((sentence, index) => {
-      const sentenceLower = sentence.toLowerCase();
+    // Ключевые слова из запроса
+    const queryWords = query.toLowerCase()
+      .split(/\s+/)
+      .filter(w => w.length > 2)
+      .map(w => w.replace(/[^\w\u0400-\u04FF]/g, ''));
+    
+    // Оценка релевантности каждого чанка
+    const scoredChunks = allChunks.map((chunk) => {
+      const chunkLower = chunk.text.toLowerCase();
       let score = 0;
       
-      // Подсчитываем совпадения ключевых слов
+      // Точные совпадения слов
       queryWords.forEach(word => {
-        if (sentenceLower.includes(word)) {
-          score += 0.2;
+        const regex = new RegExp(`\\b${word}`, 'gi');
+        const matches = chunkLower.match(regex);
+        if (matches) {
+          score += matches.length * 0.3;
         }
       });
       
-      // Добавляем случайность для демонстрации
-      score += Math.random() * 0.3;
+      // Частичные совпадения
+      queryWords.forEach(word => {
+        if (word.length > 3 && chunkLower.includes(word)) {
+          score += 0.1;
+        }
+      });
+      
+      // Бонус за длину чанка (более длинные чанки предпочтительнее)
+      if (chunk.type === 'paragraph') {
+        score += 0.05;
+      }
+      
+      // Бонус за позицию в документе (начало документа важнее)
+      const positionBonus = Math.max(0, 0.1 - (chunk.index / allChunks.length) * 0.1);
+      score += positionBonus;
       
       return {
-        content: sentence.trim(),
+        content: chunk.text.trim(),
         score: Math.min(score, 1),
-        source: `Фрагмент ${index + 1} из документа`
+        source: chunk.type === 'paragraph' 
+          ? `Абзац ${chunk.index + 1}` 
+          : `Предложение ${chunk.index + 1}`
       };
     });
     
-    // Возвращаем топ-5 самых релевантных
+    // Возвращаем топ-5 самых релевантных с минимальным порогом
     return scoredChunks
-      .filter(chunk => chunk.score > 0.1)
+      .filter(chunk => chunk.score > 0.05)
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
   };
 
-  const generateResponse = (query: string, chunks: RAGChunk[]): string => {
+  const generateResponse = (query: string, chunks: RAGChunk[], fullText: string): string => {
     if (chunks.length === 0) {
-      return `К сожалению, в документе "${uploadedFile?.name || 'документ'}" не найдено информации, релевантной вашему запросу "${query}". Попробуйте переформулировать вопрос или задать другой.`;
+      return `К сожалению, в документе "${uploadedFile?.name || 'документ'}" не найдено информации, релевантной вашему запросу "${query}". Попробуйте переформулировать вопрос или использовать другие ключевые слова.`;
     }
     
     const topChunk = chunks[0];
-    const contextInfo = chunks.map(c => c.content).join(' ');
+    const highScoreChunks = chunks.filter(c => c.score > 0.3);
     
-    return `На основе анализа документа "${uploadedFile?.name || 'документ'}" по вашему запросу "${query}" найдена следующая информация:\n\n${topChunk.content}\n\nДополнительно обнаружено ${chunks.length - 1} связанных фрагментов с релевантностью от ${(chunks[chunks.length - 1]?.score * 100 || 0).toFixed(1)}% до ${(topChunk.score * 100).toFixed(1)}%.`;
+    // Определяем тип вопроса для более точного ответа
+    const queryLower = query.toLowerCase();
+    let responsePrefix = '';
+    
+    if (queryLower.includes('название') || queryLower.includes('заголовок') || queryLower.includes('статья')) {
+      // Ищем заголовок в начале документа
+      const firstLines = fullText.split('\n').slice(0, 5);
+      const possibleTitle = firstLines.find(line => 
+        line.trim().length > 5 && 
+        line.trim().length < 200 && 
+        !line.includes('Abstract') &&
+        !line.includes('Keywords')
+      );
+      
+      if (possibleTitle) {
+        responsePrefix = `Название документа: "${possibleTitle.trim()}"\n\n`;
+      }
+    } else if (queryLower.includes('автор') || queryLower.includes('author')) {
+      responsePrefix = `Информация об авторе найдена в документе:\n\n`;
+    } else if (queryLower.includes('аннотация') || queryLower.includes('abstract') || queryLower.includes('резюме')) {
+      responsePrefix = `Аннотация документа:\n\n`;
+    } else if (queryLower.includes('вывод') || queryLower.includes('заключение') || queryLower.includes('conclusion')) {
+      responsePrefix = `Выводы из документа:\n\n`;
+    }
+    
+    let mainResponse = '';
+    if (highScoreChunks.length > 0) {
+      mainResponse = highScoreChunks.slice(0, 2).map(chunk => chunk.content).join('\n\n');
+    } else {
+      mainResponse = topChunk.content;
+    }
+    
+    const additionalInfo = chunks.length > 1 
+      ? `\n\nДополнительно найдено ${chunks.length - 1} связанных фрагментов с релевантностью от ${(chunks[chunks.length - 1]?.score * 100 || 0).toFixed(1)}% до ${(topChunk.score * 100).toFixed(1)}%.`
+      : '';
+    
+    return `${responsePrefix}${mainResponse}${additionalInfo}`;
   };
 
   const handleSendMessage = async (content: string) => {
@@ -123,7 +217,7 @@ function Index() {
       const relevantChunks = findRelevantChunks(content, documentText);
       
       // Генерация ответа на основе найденных чанков
-      const responseText = generateResponse(content, relevantChunks);
+      const responseText = generateResponse(content, relevantChunks, documentText);
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
