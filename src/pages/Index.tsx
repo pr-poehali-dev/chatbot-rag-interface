@@ -21,17 +21,92 @@ interface RAGChunk {
 
 function Index() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [documentText, setDocumentText] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [ragChunks, setRagChunks] = useState<RAGChunk[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+
+  const extractTextFromFile = async (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = e.target?.result as string;
+        if (file.type === 'application/pdf') {
+          // Симуляция извлечения текста из PDF
+          resolve(`Содержимое PDF файла "${file.name}":\n\nЭто демонстрационный текст, извлеченный из вашего PDF документа. В реальной системе здесь был бы настоящий текст из загруженного файла.\n\nОсновные разделы:\n1. Введение\n2. Методология\n3. Результаты исследования\n4. Выводы\n\nТекст содержит важную информацию по теме исследования.`);
+        } else {
+          // Симуляция извлечения текста из DOCX
+          resolve(`Содержимое DOCX файла "${file.name}":\n\nЭто демонстрационный текст из вашего Word документа. В реальной реализации здесь отображался бы фактический контент файла.\n\nСтруктура документа:\n- Заголовок\n- Основной текст\n- Таблицы и диаграммы\n- Заключение\n\nВ документе представлена подробная информация по запрашиваемой теме.`);
+        }
+      };
+      reader.readAsText(file);
+    });
+  };
 
   const handleFileUpload = async (file: File) => {
     setUploadedFile(file);
     setMessages([]);
     setRagChunks([]);
+    
+    // Извлекаем текст из файла
+    const text = await extractTextFromFile(file);
+    setDocumentText(text);
+  };
+
+  const findRelevantChunks = (query: string, text: string): RAGChunk[] => {
+    if (!text) return [];
+    
+    // Разбиваем текст на предложения
+    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 10);
+    
+    // Ключевые слова из запроса (простая реализация)
+    const queryWords = query.toLowerCase().split(' ').filter(w => w.length > 2);
+    
+    // Оценка релевантности каждого предложения
+    const scoredChunks = sentences.map((sentence, index) => {
+      const sentenceLower = sentence.toLowerCase();
+      let score = 0;
+      
+      // Подсчитываем совпадения ключевых слов
+      queryWords.forEach(word => {
+        if (sentenceLower.includes(word)) {
+          score += 0.2;
+        }
+      });
+      
+      // Добавляем случайность для демонстрации
+      score += Math.random() * 0.3;
+      
+      return {
+        content: sentence.trim(),
+        score: Math.min(score, 1),
+        source: `Фрагмент ${index + 1} из документа`
+      };
+    });
+    
+    // Возвращаем топ-5 самых релевантных
+    return scoredChunks
+      .filter(chunk => chunk.score > 0.1)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+  };
+
+  const generateResponse = (query: string, chunks: RAGChunk[]): string => {
+    if (chunks.length === 0) {
+      return `К сожалению, в документе "${uploadedFile?.name || 'документ'}" не найдено информации, релевантной вашему запросу "${query}". Попробуйте переформулировать вопрос или задать другой.`;
+    }
+    
+    const topChunk = chunks[0];
+    const contextInfo = chunks.map(c => c.content).join(' ');
+    
+    return `На основе анализа документа "${uploadedFile?.name || 'документ'}" по вашему запросу "${query}" найдена следующая информация:\n\n${topChunk.content}\n\nДополнительно обнаружено ${chunks.length - 1} связанных фрагментов с релевантностью от ${(chunks[chunks.length - 1]?.score * 100 || 0).toFixed(1)}% до ${(topChunk.score * 100).toFixed(1)}%.`;
   };
 
   const handleSendMessage = async (content: string) => {
+    if (!documentText) {
+      return;
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       content,
@@ -42,47 +117,25 @@ function Index() {
     setMessages(prev => [...prev, userMessage]);
     setIsProcessing(true);
 
-    // Симуляция RAG-чанков для демонстрации
-    const mockChunks: RAGChunk[] = [
-      {
-        content: "Компания была основана в 2020 году с целью создания инновационных решений в области искусственного интеллекта.",
-        score: 0.95,
-        source: "Введение, стр. 1"
-      },
-      {
-        content: "Наши основные продукты включают платформы для машинного обучения и обработки естественного языка.",
-        score: 0.89,
-        source: "Продукты, стр. 3"
-      },
-      {
-        content: "В команде работает более 150 специалистов в области ИИ и разработки программного обеспечения.",
-        score: 0.84,
-        source: "О компании, стр. 2"
-      },
-      {
-        content: "Мы сотрудничаем с ведущими университетами и исследовательскими центрами по всему миру.",
-        score: 0.78,
-        source: "Партнерства, стр. 5"
-      },
-      {
-        content: "Годовой оборот компании составляет более 50 миллионов долларов США.",
-        score: 0.72,
-        source: "Финансы, стр. 8"
-      }
-    ];
-
+    // Имитация задержки обработки
     setTimeout(() => {
+      // Поиск релевантных чанков в реальном тексте документа
+      const relevantChunks = findRelevantChunks(content, documentText);
+      
+      // Генерация ответа на основе найденных чанков
+      const responseText = generateResponse(content, relevantChunks);
+
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: `На основе анализа документа "${uploadedFile?.name || 'документ'}", я нашел релевантную информацию. Компания была основана в 2020 году и специализируется на создании ИИ-решений. В команде работает более 150 специалистов, а годовой оборот превышает 50 миллионов долларов.`,
+        content: responseText,
         role: 'assistant',
         timestamp: new Date(),
       };
 
       setMessages(prev => [...prev, assistantMessage]);
-      setRagChunks(mockChunks);
+      setRagChunks(relevantChunks);
       setIsProcessing(false);
-    }, 2000);
+    }, 1500);
   };
 
   return (
