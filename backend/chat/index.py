@@ -1,8 +1,8 @@
 import json
 import re
 import os
+import requests
 from typing import Dict, Any, List
-from openai import OpenAI
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     '''
@@ -62,8 +62,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'body': json.dumps({'error': 'OpenAI API key not configured'})
             }
         
-        client = OpenAI(api_key=openai_api_key)
-        
         # Выполняем RAG поиск
         relevant_chunks = perform_rag_search(query, document)
         
@@ -88,18 +86,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 Пожалуйста, ответь на вопрос на основе этих фрагментов."""
         
-        # Запрос к OpenAI
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=1000,
-            temperature=0.3
-        )
+        # Запрос к OpenAI через HTTP API
+        answer = call_openai_api(openai_api_key, system_prompt, user_prompt)
         
-        answer = response.choices[0].message.content
+        # Если OpenAI вернул ошибку, используем fallback
+        if answer.startswith("Ошибка"):
+            answer = generate_fallback_answer(relevant_chunks, query)
         
         # Возвращаем результат
         result = {
@@ -125,11 +117,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'body': json.dumps({'error': 'Invalid JSON in request body'})
         }
     except Exception as e:
-        print(f"Error processing chat request: {str(e)}")
+        print(f"Detailed error in handler: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             'statusCode': 500,
             'headers': {'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'error': 'Internal server error'})
+            'body': json.dumps({'error': f'Internal server error: {str(e)}'})
         }
 
 
@@ -226,3 +220,78 @@ def calculate_relevance_score(query: str, chunk: str, query_words: set) -> float
     return min(total_score, 1.0)  # Ограничиваем максимум единицей
 
 
+def call_openai_api(api_key: str, system_prompt: str, user_prompt: str) -> str:
+    """
+    Вызывает OpenAI API через HTTP запрос
+    """
+    try:
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'model': 'gpt-3.5-turbo',
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ],
+            'max_tokens': 1000,
+            'temperature': 0.3
+        }
+        
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        else:
+            error_msg = f"OpenAI API error: {response.status_code}"
+            if response.status_code == 401:
+                error_msg = "Недействительный OpenAI API ключ"
+            elif response.status_code == 429:
+                error_msg = "Превышен лимит запросов к OpenAI"
+            return f"Ошибка OpenAI API: {error_msg}"
+            
+    except requests.exceptions.Timeout:
+        return "Таймаут запроса к OpenAI API"
+    except requests.exceptions.RequestException as e:
+        return f"Ошибка сети при обращении к OpenAI: {str(e)}"
+    except Exception as e:
+        return f"Неожиданная ошибка OpenAI API: {str(e)}"
+
+
+def generate_fallback_answer(chunks: List[Dict[str, Any]], query: str) -> str:
+    """
+    Генерирует ответ на основе найденных фрагментов без OpenAI
+    """
+    if not chunks:
+        return f"К сожалению, я не нашел информации по вашему вопросу '{query}' в загруженном документе. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
+    
+    # Берем топ-3 самых релевантных фрагмента
+    top_chunks = chunks[:3]
+    
+    # Формируем ответ
+    answer_parts = []
+    answer_parts.append("🔍 **Найдена информация по вашему запросу:**\n")
+    
+    for i, chunk in enumerate(top_chunks, 1):
+        # Ограничиваем длину фрагмента
+        text = chunk['text']
+        if len(text) > 300:
+            text = text[:300] + "..."
+        
+        relevance = chunk['relevance']
+        relevance_emoji = "🎯" if relevance > 0.7 else "📝" if relevance > 0.4 else "📄"
+        
+        answer_parts.append(f"{relevance_emoji} **Фрагмент {i}** (релевантность: {relevance:.0%}):")
+        answer_parts.append(f"{text}\n")
+    
+    answer_parts.append(f"📊 Найдено {len(chunks)} релевантных фрагментов в документе.")
+    
+    return "\n".join(answer_parts)
