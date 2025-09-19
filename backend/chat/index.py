@@ -1,14 +1,15 @@
 import json
 import re
+import os
 from typing import Dict, Any, List
-import requests
+from openai import OpenAI
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     '''
-    Business: Обрабатывает чат запросы с RAG поиском через бесплатную LLM
-    Args: event - dict с httpMethod, body (message, document)
-          context - объект с request_id, function_name и другими атрибутами
-    Returns: HTTP ответ с response и chunks
+    Business: RAG чат-бот с OpenAI для анализа документов и поиска релевантной информации
+    Args: event - dict с httpMethod, body содержащий query и document
+          context - объект с атрибутами request_id, function_name
+    Returns: HTTP response dict с ответом и релевантными чанками
     '''
     method: str = event.get('httpMethod', 'GET')
     
@@ -33,36 +34,79 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
     
     try:
-        # Парсим данные запроса
+        # Парсим входные данные
         body_data = json.loads(event.get('body', '{}'))
-        user_message = body_data.get('message', '').strip()
-        document_content = body_data.get('document', '').strip()
+        query = body_data.get('query', '').strip()
+        document = body_data.get('document', '').strip()
         
-        if not user_message:
+        if not query:
             return {
                 'statusCode': 400,
                 'headers': {'Access-Control-Allow-Origin': '*'},
-                'body': json.dumps({'error': 'Message is required'})
+                'body': json.dumps({'error': 'Query is required'})
             }
         
-        if not document_content:
+        if not document:
             return {
                 'statusCode': 400,
                 'headers': {'Access-Control-Allow-Origin': '*'},
-                'body': json.dumps({'error': 'Document content is required'})
+                'body': json.dumps({'error': 'Document is required'})
             }
+        
+        # Инициализируем OpenAI клиент
+        openai_api_key = os.environ.get('OPENAI_API_KEY')
+        if not openai_api_key:
+            return {
+                'statusCode': 500,
+                'headers': {'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({'error': 'OpenAI API key not configured'})
+            }
+        
+        client = OpenAI(api_key=openai_api_key)
         
         # Выполняем RAG поиск
-        relevant_chunks = perform_rag_search(document_content, user_message)
+        relevant_chunks = perform_rag_search(query, document)
         
-        # Получаем ответ от бесплатной LLM
-        ai_response = get_llm_response(user_message, relevant_chunks)
+        # Создаем контекст для OpenAI
+        context_text = "\n\n".join([f"Фрагмент {i+1} (релевантность: {chunk['relevance']:.2f}):\n{chunk['text']}" 
+                                   for i, chunk in enumerate(relevant_chunks)])
         
-        # Формируем ответ
+        # Формируем промпт для OpenAI
+        system_prompt = """Ты - помощник по анализу документов. Твоя задача - отвечать на вопросы пользователя на основе предоставленных фрагментов документа.
+
+Правила:
+1. Отвечай только на основе предоставленной информации
+2. Если информации недостаточно, так и скажи
+3. Структурируй ответ с нумерацией пунктов если возможно
+4. Указывай на какие фрагменты ты ссылаешься
+5. Отвечай на русском языке"""
+
+        user_prompt = f"""Вопрос пользователя: {query}
+
+Доступные фрагменты документа:
+{context_text}
+
+Пожалуйста, ответь на вопрос на основе этих фрагментов."""
+        
+        # Запрос к OpenAI
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=1000,
+            temperature=0.3
+        )
+        
+        answer = response.choices[0].message.content
+        
+        # Возвращаем результат
         result = {
-            'response': ai_response,
-            'chunks': relevant_chunks[:5],  # Топ-5 чанков
-            'request_id': context.request_id
+            'answer': answer,
+            'relevant_chunks': relevant_chunks[:5],  # Топ-5 чанков
+            'query': query,
+            'chunks_found': len(relevant_chunks)
         }
         
         return {
@@ -89,114 +133,96 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
 
 
-def get_llm_response(question: str, chunks: List[Dict[str, Any]]) -> str:
+def perform_rag_search(query: str, document: str, chunk_size: int = 200) -> List[Dict[str, Any]]:
     """
-    Получает ответ от бесплатной LLM через Hugging Face API
+    Выполняет RAG поиск по документу
     """
-    try:
-        # Используем бесплатный API Hugging Face без токена (ограниченный, но работает)
-        api_url = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
-        
-        # Формируем контекст из найденных чанков
-        if chunks:
-            context = "\n".join([chunk['text'][:200] for chunk in chunks[:3]])
-            prompt = f"Контекст: {context}\n\nВопрос: {question}\n\nОтвет:"
-        else:
-            prompt = f"Вопрос: {question}\n\nОтвет:"
-        
-        # Отправляем запрос
-        response = requests.post(
-            api_url,
-            headers={"Content-Type": "application/json"},
-            json={"inputs": prompt, "parameters": {"max_length": 300, "temperature": 0.7}},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                generated_text = result[0].get('generated_text', '')
-                # Извлекаем только ответ после "Ответ:"
-                if "Ответ:" in generated_text:
-                    answer = generated_text.split("Ответ:")[-1].strip()
-                    if answer:
-                        return answer
-            
-        # Fallback: используем простую логику на основе найденных чанков
-        return generate_simple_answer(chunks, question)
-        
-    except Exception as e:
-        print(f"Error with LLM API: {str(e)}")
-        # Fallback: простой ответ на основе найденных фрагментов
-        return generate_simple_answer(chunks, question)
-
-
-def generate_simple_answer(chunks: List[Dict[str, Any]], question: str) -> str:
-    """
-    Генерирует простой ответ на основе найденных фрагментов
-    """
-    if not chunks:
-        return f"К сожалению, я не нашел информации по вашему вопросу '{question}' в загруженном документе. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
+    # Разбиваем документ на чанки
+    chunks = create_chunks(document, chunk_size)
     
-    # Берем топ-3 самых релевантных фрагмента
-    top_chunks = chunks[:3]
+    # Вычисляем релевантность каждого чанка
+    scored_chunks = []
+    query_lower = query.lower()
+    query_words = set(re.findall(r'\b\w+\b', query_lower))
     
-    # Формируем ответ
-    answer_parts = []
-    answer_parts.append("На основе анализа документа найдена следующая информация:\n")
-    
-    for i, chunk in enumerate(top_chunks, 1):
-        # Ограничиваем длину фрагмента
-        text = chunk['text']
-        if len(text) > 300:
-            text = text[:300] + "..."
-        answer_parts.append(f"{i}. {text}")
-    
-    answer_parts.append(f"\nЭто наиболее релевантные фрагменты из {len(chunks)} найденных по вашему запросу.")
-    
-    return "\n\n".join(answer_parts)
-
-
-def perform_rag_search(document: str, query: str) -> List[Dict[str, Any]]:
-    """
-    Выполняет улучшенный RAG поиск по документу
-    """
-    # Разбиваем документ на предложения
-    sentences = re.split(r'[.!?]+', document)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-    
-    # Получаем ключевые слова из запроса
-    query_words = set(query.lower().split())
-    query_words = {word for word in query_words if len(word) > 2}
-    
-    chunks = []
-    
-    for i, sentence in enumerate(sentences):
-        sentence_lower = sentence.lower()
+    for i, chunk in enumerate(chunks):
+        chunk_lower = chunk.lower()
+        score = calculate_relevance_score(query_lower, chunk_lower, query_words)
         
-        # Подсчитываем релевантность разными способами
-        word_matches = sum(1 for word in query_words if word in sentence_lower)
-        phrase_match = 5 if query.lower() in sentence_lower else 0
-        
-        # Бонус за частичные совпадения
-        partial_matches = 0
-        for word in query_words:
-            if len(word) > 4:  # Для длинных слов ищем частичные совпадения
-                for sentence_word in sentence_lower.split():
-                    if word in sentence_word or sentence_word in word:
-                        partial_matches += 0.5
-        
-        # Итоговый счет
-        total_score = (word_matches + phrase_match + partial_matches) / max(len(query_words), 1)
-        
-        if total_score > 0:
-            chunks.append({
-                'text': sentence,
-                'score': min(total_score, 1.0),  # Ограничиваем до 1.0
-                'index': i
+        if score > 0:  # Только релевантные чанки
+            scored_chunks.append({
+                'text': chunk,
+                'relevance': score,
+                'chunk_id': i,
+                'length': len(chunk)
             })
     
     # Сортируем по релевантности
-    chunks.sort(key=lambda x: x['score'], reverse=True)
+    scored_chunks.sort(key=lambda x: x['relevance'], reverse=True)
     
-    return chunks[:10]  # Возвращаем топ-10
+    return scored_chunks
+
+
+def create_chunks(text: str, chunk_size: int = 200) -> List[str]:
+    """
+    Разбивает текст на чанки с учетом предложений
+    """
+    # Разбиваем на предложения
+    sentences = re.split(r'[.!?]+', text)
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # Если добавление предложения не превышает лимит
+        if len(current_chunk + sentence) <= chunk_size:
+            current_chunk += sentence + ". "
+        else:
+            # Сохраняем текущий чанк и начинаем новый
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
+    
+    # Добавляем последний чанк
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+
+def calculate_relevance_score(query: str, chunk: str, query_words: set) -> float:
+    """
+    Вычисляет релевантность чанка запросу
+    """
+    chunk_words = set(re.findall(r'\b\w+\b', chunk))
+    
+    # Точные совпадения слов
+    exact_matches = len(query_words.intersection(chunk_words))
+    
+    # Частичные совпадения (для длинных слов)
+    partial_score = 0
+    for query_word in query_words:
+        if len(query_word) > 4:  # Только для длинных слов
+            for chunk_word in chunk_words:
+                if query_word in chunk_word or chunk_word in query_word:
+                    partial_score += 0.5
+    
+    # Проверяем точные фразы
+    phrase_score = 0
+    if len(query) > 10:  # Для фраз длиннее 10 символов
+        if query in chunk:
+            phrase_score = 2.0
+    
+    # Итоговый скор
+    total_score = exact_matches + partial_score + phrase_score
+    
+    # Нормализуем относительно длины запроса
+    if len(query_words) > 0:
+        total_score = total_score / len(query_words)
+    
+    return min(total_score, 1.0)  # Ограничиваем максимум единицей
+
+

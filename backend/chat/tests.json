@@ -5,13 +5,13 @@
       "method": "POST",
       "path": "/",
       "body": {
-        "message": "Что такое искусственный интеллект?",
+        "query": "Что такое искусственный интеллект?",
         "document": "Искусственный интеллект - это область компьютерных наук, которая занимается созданием умных машин."
       },
       "expectedStatus": 200,
       "expectedBody": {
-        "response": "string",
-        "chunks": "array"
+        "answer": "string",
+        "relevant_chunks": "array"
       },
       "bodyMatcher": "partial"
     },

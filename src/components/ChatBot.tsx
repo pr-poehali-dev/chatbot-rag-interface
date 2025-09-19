@@ -10,10 +10,10 @@ interface Message {
 }
 
 interface RAGChunk {
-  id: string;
-  content: string;
-  similarity: number;
-  source: string;
+  text: string;
+  relevance: number;
+  chunk_id: number;
+  length: number;
 }
 
 export default function ChatBot() {
@@ -142,7 +142,7 @@ export default function ChatBot() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          message: question,
+          query: question,
           document: fileContent
         }),
       });
@@ -157,9 +157,9 @@ export default function ChatBot() {
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
-        content: result.response,
+        content: result.answer,
         timestamp: new Date(),
-        chunks: result.chunks || []
+        chunks: result.relevant_chunks || []
       };
 
       setMessages(prev => [...prev, botMessage]);
@@ -283,10 +283,10 @@ export default function ChatBot() {
               <div className="ml-11 space-y-2">
                 <h4 className="text-sm font-medium text-gray-700">Найденные фрагменты (топ-5):</h4>
                 {message.chunks.map((chunk, index) => (
-                  <div key={chunk.id} className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                  <div key={chunk.chunk_id} className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-xs font-medium text-yellow-800">
-                        #{index + 1} • Релевантность: {(chunk.score * 100).toFixed(1)}%
+                        #{index + 1} • Релевантность: {(chunk.relevance * 100).toFixed(1)}%
                       </span>
                       <span className="text-xs text-gray-500">{uploadedFile?.name}</span>
                     </div>
