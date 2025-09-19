@@ -1,13 +1,11 @@
 import json
-import os
 import re
 from typing import Dict, Any, List
-import openai
-from openai import OpenAI
+import requests
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     '''
-    Business: Обрабатывает чат запросы с RAG поиском через OpenAI
+    Business: Обрабатывает чат запросы с RAG поиском через бесплатную LLM
     Args: event - dict с httpMethod, body (message, document)
           context - объект с request_id, function_name и другими атрибутами
     Returns: HTTP ответ с response и chunks
@@ -54,52 +52,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'body': json.dumps({'error': 'Document content is required'})
             }
         
-        # Инициализируем OpenAI клиент
-        api_key = os.environ.get('OPENAI_API_KEY')
-        if not api_key:
-            return {
-                'statusCode': 500,
-                'headers': {'Access-Control-Allow-Origin': '*'},
-                'body': json.dumps({'error': 'OpenAI API key not configured'})
-            }
-        
-        client = OpenAI(api_key=api_key)
-        
         # Выполняем RAG поиск
         relevant_chunks = perform_rag_search(document_content, user_message)
         
-        # Формируем контекст для OpenAI
-        context_text = "\n\n".join([chunk['text'] for chunk in relevant_chunks[:5]])
-        
-        # Создаем промпт для OpenAI
-        system_prompt = """Ты - помощник для анализа документов. Отвечай на вопросы пользователя на основе предоставленного контекста из документа.
-
-Правила:
-1. Используй только информацию из предоставленного контекста
-2. Если в контексте нет ответа на вопрос, честно скажи об этом
-3. Отвечай на русском языке
-4. Будь точным и конкретным
-5. Ссылайся на конкретные фрагменты текста при ответе"""
-
-        user_prompt = f"""Контекст из документа:
-{context_text}
-
-Вопрос пользователя: {user_message}
-
-Ответь на вопрос на основе предоставленного контекста."""
-
-        # Отправляем запрос к OpenAI
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=1000,
-            temperature=0.3
-        )
-        
-        ai_response = response.choices[0].message.content
+        # Получаем ответ от бесплатной LLM
+        ai_response = get_llm_response(user_message, relevant_chunks)
         
         # Формируем ответ
         result = {
@@ -132,9 +89,77 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
 
 
+def get_llm_response(question: str, chunks: List[Dict[str, Any]]) -> str:
+    """
+    Получает ответ от бесплатной LLM через Hugging Face API
+    """
+    try:
+        # Используем бесплатный API Hugging Face без токена (ограниченный, но работает)
+        api_url = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
+        
+        # Формируем контекст из найденных чанков
+        if chunks:
+            context = "\n".join([chunk['text'][:200] for chunk in chunks[:3]])
+            prompt = f"Контекст: {context}\n\nВопрос: {question}\n\nОтвет:"
+        else:
+            prompt = f"Вопрос: {question}\n\nОтвет:"
+        
+        # Отправляем запрос
+        response = requests.post(
+            api_url,
+            headers={"Content-Type": "application/json"},
+            json={"inputs": prompt, "parameters": {"max_length": 300, "temperature": 0.7}},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0:
+                generated_text = result[0].get('generated_text', '')
+                # Извлекаем только ответ после "Ответ:"
+                if "Ответ:" in generated_text:
+                    answer = generated_text.split("Ответ:")[-1].strip()
+                    if answer:
+                        return answer
+            
+        # Fallback: используем простую логику на основе найденных чанков
+        return generate_simple_answer(chunks, question)
+        
+    except Exception as e:
+        print(f"Error with LLM API: {str(e)}")
+        # Fallback: простой ответ на основе найденных фрагментов
+        return generate_simple_answer(chunks, question)
+
+
+def generate_simple_answer(chunks: List[Dict[str, Any]], question: str) -> str:
+    """
+    Генерирует простой ответ на основе найденных фрагментов
+    """
+    if not chunks:
+        return f"К сожалению, я не нашел информации по вашему вопросу '{question}' в загруженном документе. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
+    
+    # Берем топ-3 самых релевантных фрагмента
+    top_chunks = chunks[:3]
+    
+    # Формируем ответ
+    answer_parts = []
+    answer_parts.append("На основе анализа документа найдена следующая информация:\n")
+    
+    for i, chunk in enumerate(top_chunks, 1):
+        # Ограничиваем длину фрагмента
+        text = chunk['text']
+        if len(text) > 300:
+            text = text[:300] + "..."
+        answer_parts.append(f"{i}. {text}")
+    
+    answer_parts.append(f"\nЭто наиболее релевантные фрагменты из {len(chunks)} найденных по вашему запросу.")
+    
+    return "\n\n".join(answer_parts)
+
+
 def perform_rag_search(document: str, query: str) -> List[Dict[str, Any]]:
     """
-    Выполняет простой RAG поиск по документу
+    Выполняет улучшенный RAG поиск по документу
     """
     # Разбиваем документ на предложения
     sentences = re.split(r'[.!?]+', document)
@@ -149,12 +174,20 @@ def perform_rag_search(document: str, query: str) -> List[Dict[str, Any]]:
     for i, sentence in enumerate(sentences):
         sentence_lower = sentence.lower()
         
-        # Подсчитываем релевантность
+        # Подсчитываем релевантность разными способами
         word_matches = sum(1 for word in query_words if word in sentence_lower)
         phrase_match = 5 if query.lower() in sentence_lower else 0
         
-        # Нормализуем счет
-        total_score = (word_matches + phrase_match) / max(len(query_words), 1)
+        # Бонус за частичные совпадения
+        partial_matches = 0
+        for word in query_words:
+            if len(word) > 4:  # Для длинных слов ищем частичные совпадения
+                for sentence_word in sentence_lower.split():
+                    if word in sentence_word or sentence_word in word:
+                        partial_matches += 0.5
+        
+        # Итоговый счет
+        total_score = (word_matches + phrase_match + partial_matches) / max(len(query_words), 1)
         
         if total_score > 0:
             chunks.append({
