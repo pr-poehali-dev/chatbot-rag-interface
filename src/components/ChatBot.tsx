@@ -28,44 +28,59 @@ export default function ChatBot() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.endsWith('.txt')) {
+    // Проверяем размер файла (максимум 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Файл слишком большой. Максимальный размер: 10MB');
+      return;
+    }
+
+    // Принимаем только текстовые файлы
+    if (!file.name.endsWith('.txt') && !file.type.startsWith('text/')) {
       alert('Пожалуйста, загрузите текстовый файл (.txt)');
       return;
     }
 
     setIsProcessingFile(true);
     try {
-      const text = await file.text();
-      
-      // Отправляем файл на сервер для создания RAG
-      const response = await fetch('/api/rag/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          content: text,
-          filename: file.name
-        })
+      console.log('Обрабатываем файл:', {
+        name: file.name,
+        size: file.size,
+        type: file.type
       });
 
-      if (response.ok) {
-        setUploadedFile(file);
-        const botMessage: Message = {
-          id: Date.now().toString(),
-          type: 'bot',
-          content: `Файл "${file.name}" успешно загружен и обработан! Теперь вы можете задавать вопросы по его содержимому.`,
-          timestamp: new Date()
-        };
-        setMessages(prev => [...prev, botMessage]);
-      } else {
-        throw new Error('Ошибка при загрузке файла');
+      const text = await file.text();
+      
+      // Проверяем, что файл не пустой
+      if (!text.trim()) {
+        throw new Error('Файл пустой или не содержит текста');
       }
+
+      console.log('Текст извлечен, длина:', text.length);
+
+      // Временно обрабатываем файл локально (пока нет backend)
+      setUploadedFile(file);
+      const botMessage: Message = {
+        id: Date.now().toString(),
+        type: 'bot',
+        content: `Файл "${file.name}" успешно загружен! Размер: ${(file.size / 1024).toFixed(1)}KB, символов: ${text.length}. Теперь вы можете задавать вопросы по его содержимому.`,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, botMessage]);
+
+      // Сохраняем текст в localStorage для использования
+      localStorage.setItem('uploadedFileContent', text);
+      localStorage.setItem('uploadedFileName', file.name);
+
     } catch (error) {
-      console.error('Error processing file:', error);
-      alert('Ошибка при обработке файла');
+      console.error('Ошибка при обработке файла:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
+      alert(`Ошибка при обработке файла: ${errorMessage}. Убедитесь, что файл не поврежден и имеет правильный формат.`);
     } finally {
       setIsProcessingFile(false);
+      // Очищаем input для возможности загрузки того же файла снова
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -85,29 +100,30 @@ export default function ChatBot() {
     };
 
     setMessages(prev => [...prev, userMessage]);
+    const question = inputValue;
     setInputValue('');
     setIsLoading(true);
 
     try {
-      const response = await fetch('/api/rag/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          question: inputValue,
-          filename: uploadedFile.name
-        })
-      });
+      // Получаем контент из localStorage
+      const fileContent = localStorage.getItem('uploadedFileContent');
+      
+      if (!fileContent) {
+        throw new Error('Содержимое файла не найдено. Загрузите файл заново.');
+      }
 
-      const data = await response.json();
+      // Простой поиск релевантных фрагментов
+      const searchResults = simpleRAGSearch(fileContent, question);
+      
+      // Формируем ответ на основе найденных фрагментов
+      const answer = generateSimpleAnswer(searchResults, question);
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
-        content: data.answer,
+        content: answer,
         timestamp: new Date(),
-        chunks: data.chunks
+        chunks: searchResults.slice(0, 5) // Топ-5 чанков
       };
 
       setMessages(prev => [...prev, botMessage]);
@@ -116,13 +132,60 @@ export default function ChatBot() {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
-        content: 'Извините, произошла ошибка при обработке вашего вопроса.',
+        content: `Извините, произошла ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`,
         timestamp: new Date()
       };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Простая функция поиска по тексту
+  const simpleRAGSearch = (content: string, query: string): RAGChunk[] => {
+    const sentences = content.split(/[.!?]+/).filter(s => s.trim().length > 20);
+    const queryWords = query.toLowerCase().split(/\s+/);
+    
+    const results = sentences.map((sentence, index) => {
+      const sentenceLower = sentence.toLowerCase();
+      let score = 0;
+      
+      // Подсчитываем совпадения слов
+      queryWords.forEach(word => {
+        if (word.length > 2 && sentenceLower.includes(word)) {
+          score += 1;
+        }
+      });
+      
+      // Бонус за точные фразы
+      if (sentenceLower.includes(query.toLowerCase())) {
+        score += 5;
+      }
+      
+      return {
+        id: `chunk-${index}`,
+        content: sentence.trim(),
+        similarity: score / Math.max(queryWords.length, 1),
+        source: uploadedFile?.name || 'unknown'
+      };
+    });
+    
+    return results
+      .filter(r => r.similarity > 0)
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, 10);
+  };
+
+  // Простая генерация ответа
+  const generateSimpleAnswer = (chunks: RAGChunk[], question: string): string => {
+    if (chunks.length === 0) {
+      return `Извините, я не нашел информации по вашему вопросу "${question}" в загруженном файле. Попробуйте переформулировать вопрос или использовать другие ключевые слова.`;
+    }
+    
+    const topChunks = chunks.slice(0, 3);
+    const context = topChunks.map(chunk => chunk.content).join(' ');
+    
+    return `На основе анализа файла найдена следующая информация:\n\n${context}\n\nЭто наиболее релевантные фрагменты из ${chunks.length} найденных по вашему запросу "${question}".`;
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
