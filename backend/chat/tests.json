@@ -1,0 +1,25 @@
+{
+  "tests": [
+    {
+      "name": "Test chat endpoint",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "message": "Что такое искусственный интеллект?",
+        "document": "Искусственный интеллект - это область компьютерных наук, которая занимается созданием умных машин."
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "response": "string",
+        "chunks": "array"
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Test OPTIONS for CORS",
+      "method": "OPTIONS", 
+      "path": "/",
+      "expectedStatus": 200
+    }
+  ]
+}

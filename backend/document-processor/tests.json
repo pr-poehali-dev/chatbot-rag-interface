@@ -1,0 +1,28 @@
+{
+  "tests": [
+    {
+      "name": "Test document processor endpoint",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "file_data": "SGVsbG8gV29ybGQh",
+        "file_name": "test.txt",
+        "file_type": "text/plain"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "text": "string",
+        "file_name": "string",
+        "file_size": "number",
+        "text_length": "number"
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Test OPTIONS for CORS",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    }
+  ]
+}

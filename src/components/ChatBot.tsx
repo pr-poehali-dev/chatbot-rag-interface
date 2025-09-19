@@ -34,9 +34,12 @@ export default function ChatBot() {
       return;
     }
 
-    // Принимаем только текстовые файлы
-    if (!file.name.endsWith('.txt') && !file.type.startsWith('text/')) {
-      alert('Пожалуйста, загрузите текстовый файл (.txt)');
+    // Принимаем TXT, PDF и Word файлы
+    const allowedExtensions = ['.txt', '.pdf', '.doc', '.docx'];
+    const hasValidExtension = allowedExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+    
+    if (!hasValidExtension) {
+      alert('Поддерживаемые форматы: TXT, PDF, DOC, DOCX');
       return;
     }
 
@@ -48,27 +51,47 @@ export default function ChatBot() {
         type: file.type
       });
 
-      const text = await file.text();
+      // Отправляем файл на backend для обработки
+      const fileData = await fileToBase64(file);
       
-      // Проверяем, что файл не пустой
-      if (!text.trim()) {
-        throw new Error('Файл пустой или не содержит текста');
+      const response = await fetch('https://functions.poehali.dev/7a3e3ea4-9cd4-4958-b88a-4b0e8a0642af', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          file_data: fileData,
+          file_name: file.name,
+          file_type: file.type
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP ${response.status}`);
       }
 
-      console.log('Текст извлечен, длина:', text.length);
+      const result = await response.json();
+      const extractedText = result.text;
+      
+      // Проверяем, что текст извлечен
+      if (!extractedText.trim()) {
+        throw new Error('Не удалось извлечь текст из файла');
+      }
 
-      // Временно обрабатываем файл локально (пока нет backend)
+      console.log('Текст извлечен, длина:', extractedText.length);
+
       setUploadedFile(file);
       const botMessage: Message = {
         id: Date.now().toString(),
         type: 'bot',
-        content: `Файл "${file.name}" успешно загружен! Размер: ${(file.size / 1024).toFixed(1)}KB, символов: ${text.length}. Теперь вы можете задавать вопросы по его содержимому.`,
+        content: `Файл "${file.name}" успешно обработан! Размер: ${(file.size / 1024).toFixed(1)}KB, извлечено символов: ${extractedText.length}. Теперь вы можете задавать вопросы по его содержимому.`,
         timestamp: new Date()
       };
       setMessages(prev => [...prev, botMessage]);
 
       // Сохраняем текст в localStorage для использования
-      localStorage.setItem('uploadedFileContent', text);
+      localStorage.setItem('uploadedFileContent', extractedText);
       localStorage.setItem('uploadedFileName', file.name);
 
     } catch (error) {
@@ -88,7 +111,7 @@ export default function ChatBot() {
     if (!inputValue.trim() || isLoading) return;
 
     if (!uploadedFile) {
-      alert('Сначала загрузите текстовый файл');
+      alert('Сначала загрузите документ');
       return;
     }
 
@@ -112,18 +135,31 @@ export default function ChatBot() {
         throw new Error('Содержимое файла не найдено. Загрузите файл заново.');
       }
 
-      // Простой поиск релевантных фрагментов
-      const searchResults = simpleRAGSearch(fileContent, question);
-      
-      // Формируем ответ на основе найденных фрагментов
-      const answer = generateSimpleAnswer(searchResults, question);
+      // Отправляем запрос к backend для получения ответа от OpenAI
+      const response = await fetch('https://functions.poehali.dev/4fb1d688-b077-46e0-a394-ae3de63474a2', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: question,
+          document: fileContent
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'bot',
-        content: answer,
+        content: result.response,
         timestamp: new Date(),
-        chunks: searchResults.slice(0, 5) // Топ-5 чанков
+        chunks: result.chunks || []
       };
 
       setMessages(prev => [...prev, botMessage]);
@@ -141,51 +177,19 @@ export default function ChatBot() {
     }
   };
 
-  // Простая функция поиска по тексту
-  const simpleRAGSearch = (content: string, query: string): RAGChunk[] => {
-    const sentences = content.split(/[.!?]+/).filter(s => s.trim().length > 20);
-    const queryWords = query.toLowerCase().split(/\s+/);
-    
-    const results = sentences.map((sentence, index) => {
-      const sentenceLower = sentence.toLowerCase();
-      let score = 0;
-      
-      // Подсчитываем совпадения слов
-      queryWords.forEach(word => {
-        if (word.length > 2 && sentenceLower.includes(word)) {
-          score += 1;
-        }
-      });
-      
-      // Бонус за точные фразы
-      if (sentenceLower.includes(query.toLowerCase())) {
-        score += 5;
-      }
-      
-      return {
-        id: `chunk-${index}`,
-        content: sentence.trim(),
-        similarity: score / Math.max(queryWords.length, 1),
-        source: uploadedFile?.name || 'unknown'
+  // Функция для конвертации файла в base64
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Удаляем префикс data:type;base64,
+        const base64 = result.split(',')[1];
+        resolve(base64);
       };
+      reader.onerror = error => reject(error);
     });
-    
-    return results
-      .filter(r => r.similarity > 0)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, 10);
-  };
-
-  // Простая генерация ответа
-  const generateSimpleAnswer = (chunks: RAGChunk[], question: string): string => {
-    if (chunks.length === 0) {
-      return `Извините, я не нашел информации по вашему вопросу "${question}" в загруженном файле. Попробуйте переформулировать вопрос или использовать другие ключевые слова.`;
-    }
-    
-    const topChunks = chunks.slice(0, 3);
-    const context = topChunks.map(chunk => chunk.content).join(' ');
-    
-    return `На основе анализа файла найдена следующая информация:\n\n${context}\n\nЭто наиболее релевантные фрагменты из ${chunks.length} найденных по вашему запросу "${question}".`;
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -217,7 +221,7 @@ export default function ChatBot() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".txt"
+              accept=".txt,.pdf,.doc,.docx"
               onChange={handleFileUpload}
               className="hidden"
             />
@@ -243,7 +247,7 @@ export default function ChatBot() {
           <div className="text-center text-gray-500 mt-20">
             <FileText className="w-16 h-16 mx-auto mb-4 text-gray-300" />
             <h3 className="text-lg font-medium mb-2">Добро пожаловать в RAG чат-бот!</h3>
-            <p>Загрузите текстовый файл и начните задавать вопросы по его содержимому.</p>
+            <p>Загрузите документ (TXT, PDF, DOC, DOCX) и начните задавать вопросы по его содержимому.</p>
           </div>
         )}
 
@@ -282,11 +286,11 @@ export default function ChatBot() {
                   <div key={chunk.id} className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-xs font-medium text-yellow-800">
-                        #{index + 1} • Релевантность: {(chunk.similarity * 100).toFixed(1)}%
+                        #{index + 1} • Релевантность: {(chunk.score * 100).toFixed(1)}%
                       </span>
-                      <span className="text-xs text-gray-500">{chunk.source}</span>
+                      <span className="text-xs text-gray-500">{uploadedFile?.name}</span>
                     </div>
-                    <p className="text-sm text-gray-700 line-clamp-3">{chunk.content}</p>
+                    <p className="text-sm text-gray-700 line-clamp-3">{chunk.text}</p>
                   </div>
                 ))}
               </div>
@@ -319,7 +323,7 @@ export default function ChatBot() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyPress={handleKeyPress}
-              placeholder={uploadedFile ? "Задайте вопрос по загруженному файлу..." : "Сначала загрузите файл"}
+              placeholder={uploadedFile ? "Задайте вопрос по загруженному документу..." : "Сначала загрузите документ"}
               disabled={!uploadedFile || isLoading}
               className="w-full p-3 border border-gray-300 rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
               rows={1}
