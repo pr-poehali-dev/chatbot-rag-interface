@@ -33,14 +33,14 @@ const FileUpload = ({ onFileUpload }: FileUploadProps) => {
     if (file && (file.type === 'application/pdf' || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')) {
       handleFileUpload(file);
     }
-  }, []);
+  }, [handleFileUpload]);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       handleFileUpload(file);
     }
-  }, []);
+  }, [handleFileUpload]);
 
   const handleFileUpload = async (file: File) => {
     setIsUploading(true);
